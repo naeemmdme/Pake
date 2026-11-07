@@ -23,9 +23,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential curl wget file \
+            build-essential curl wget file dpkg \
             libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator3-dev \
-            librsvg2-dev libxdo-dev patchelf libfuse2
+            librsvg2-dev libxdo-dev patchelf
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -40,6 +40,11 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .pake-src/src-tauri
+
       - name: Download and prepare vBlockTube
         run: node scripts/prepare-vblocktube.mjs
         env:
@@ -47,8 +52,18 @@ jobs:
 
       - name: Get and patch Pake source
         run: |
-          git clone --depth 1 https://github.com/tw93/Pake.git .pake-src
+          # Pin to the latest released tag instead of moving main,
+          # so the patch target stays stable. Override with PAKE_REF if needed.
+          REF="${PAKE_REF:-$(git ls-remote --tags --refs --sort=-v:refname https://github.com/tw93/Pake.git 'V*' 'v*' | head -n 1 | sed 's#.*refs/tags/##')}"
+          echo "Using Pake ref: ${REF:-<default branch>}"
+          if [ -n "$REF" ]; then
+            git clone --depth 1 --branch "$REF" https://github.com/tw93/Pake.git .pake-src
+          else
+            git clone --depth 1 https://github.com/tw93/Pake.git .pake-src
+          fi
           python3 scripts/patch-pake-injection.py .pake-src/bin/utils/combine.ts
+        env:
+          PAKE_REF: ""
 
       - name: Build patched Pake CLI
         working-directory: .pake-src
@@ -56,28 +71,31 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm cli:build
 
-      - name: Build YouTube Pake app
+      - name: Build YouTube Pake app (deb)
         run: |
           node .pake-src/dist/cli.js https://www.youtube.com \
             --name "YouTube" \
-            --targets appimage \
-            --inject ./tools/pake-gm-compat.js,./tools/vblocktube.js \
-            --debug
+            --targets deb \
+            --inject ./tools/pake-gm-compat.js,./tools/vblocktube.js
 
-      - name: Collect AppImage
+      - name: Collect deb package
         run: |
           mkdir -p dist
-          APPIMAGE="$(find . -type f -name '*.AppImage' -not -path './.git/*' | head -n 1)"
-          if [ -z "$APPIMAGE" ]; then
-            echo "No AppImage was produced. Check the Pake build log."
+          DEB="$(find . -type f -name '*.deb' \
+            -not -path './.git/*' -not -path '*/node_modules/*' \
+            -not -path './dist/*' -printf '%T@ %p\n' | sort -rn | head -n 1 | cut -d' ' -f2-)"
+          if [ -z "$DEB" ]; then
+            echo "No .deb was produced. Check the Pake build log."
             exit 1
           fi
-          cp "$APPIMAGE" dist/YouTube-vBlockTube.AppImage
+          echo "Found: $DEB"
+          cp "$DEB" dist/YouTube-vBlockTube.deb
+          dpkg-deb --info dist/YouTube-vBlockTube.deb
           ls -lh dist/
 
-      - name: Upload AppImage
+      - name: Upload deb
         uses: actions/upload-artifact@v4
         with:
-          name: YouTube-vBlockTube-Linux-x86_64
-          path: dist/YouTube-vBlockTube.AppImage
+          name: YouTube-vBlockTube-Linux-x86_64-deb
+          path: dist/YouTube-vBlockTube.deb
           if-no-files-found: error
