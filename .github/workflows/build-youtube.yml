@@ -1,0 +1,83 @@
+name: Build YouTube with vBlockTube
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-youtube.yml"
+      - "tools/**"
+      - "scripts/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl wget file \
+            libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev patchelf libfuse2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download and prepare vBlockTube
+        run: node scripts/prepare-vblocktube.mjs
+        env:
+          VBLOCKTUBE_VERSION: "2.1.0"
+
+      - name: Get and patch Pake source
+        run: |
+          git clone --depth 1 https://github.com/tw93/Pake.git .pake-src
+          python3 scripts/patch-pake-injection.py .pake-src/bin/utils/combine.ts
+
+      - name: Build patched Pake CLI
+        working-directory: .pake-src
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm cli:build
+
+      - name: Build YouTube Pake app
+        run: |
+          node .pake-src/dist/cli.js https://www.youtube.com \
+            --name "YouTube" \
+            --targets appimage \
+            --inject ./tools/pake-gm-compat.js,./tools/vblocktube.js \
+            --debug
+
+      - name: Collect AppImage
+        run: |
+          mkdir -p dist
+          APPIMAGE="$(find . -type f -name '*.AppImage' -not -path './.git/*' | head -n 1)"
+          if [ -z "$APPIMAGE" ]; then
+            echo "No AppImage was produced. Check the Pake build log."
+            exit 1
+          fi
+          cp "$APPIMAGE" dist/YouTube-vBlockTube.AppImage
+          ls -lh dist/
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouTube-vBlockTube-Linux-x86_64
+          path: dist/YouTube-vBlockTube.AppImage
+          if-no-files-found: error
